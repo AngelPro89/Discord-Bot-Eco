@@ -1,4 +1,5 @@
    
+# pyrefly: ignore [missing-import]
 import aiohttp
 
 async def get_weather(session: aiohttp.ClientSession, city: str) -> str:
