@@ -19,10 +19,14 @@ import asyncio
 from music import extract_tracks, MusicPlayer 
 
 
+print(discord.__version__)
+
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 players = {}
+
 
 @bot.event
 async def on_ready():
@@ -167,7 +171,22 @@ async def play(ctx, *, search: str):
 
         # FIX: Conectarse al canal DESPUÉS de confirmar que hay tracks disponibles
         if not ctx.voice_client:
-            await ctx.author.voice.channel.connect()
+            try:
+                print(f"Intentando conectar a: {ctx.author.voice.channel.name}")
+
+                vc = await ctx.author.voice.channel.connect(
+                    timeout=30,
+                    reconnect=True
+                )
+
+                print(f"Conectado correctamente: {vc}")
+
+            except Exception as e:
+                print(f"ERROR DE VOZ: {type(e).__name__}: {e}")
+
+                return await waiting_msg.edit(
+                    content=f"❌ Error al conectarme al canal de voz:\n`{e}`"
+                )
         
         # Pequeña espera para que la conexión de voz se estabilice
         await asyncio.sleep(1)
@@ -203,5 +222,21 @@ async def play(ctx, *, search: str):
         await waiting_msg.edit(content=f"❌ Hubo un error al intentar reproducir el audio: {e}")
 
 
+@bot.command()
+async def join(ctx):
+    if not ctx.author.voice:
+        return await ctx.send("Entra a un canal primero")
+
+    await ctx.author.voice.channel.connect()
+    await ctx.send("Conectado")
+
+@bot.command()
+async def perms(ctx):
+    channel = ctx.author.voice.channel
+
+    print("Connect:", channel.permissions_for(ctx.guild.me).connect)
+    print("Speak:", channel.permissions_for(ctx.guild.me).speak)
+
+    await ctx.send("Revisado")
 
 bot.run(os.getenv("DISCORD_TOKEN"))

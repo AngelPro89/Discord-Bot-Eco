@@ -4,81 +4,106 @@ import discord
 import yt_dlp
 from collections import deque
 
-# Configuración óptima para streaming de audio sin descargas locales pesadas
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+print("YT-DLP VERSION:", yt_dlp.version.__version__)
+
+# Configuración base común optimizada para streaming
+YTDL_BASE_OPTIONS = {
+    # Cambiado a un selector más flexible para evitar falsos negativos en YT Music
+    'format': 'bestaudio/ba/best', 
     'restrictfilenames': True,
-    'noplaylist': False,  # IMPORTANTE: True rompería las playlists, lo dejamos en False
+    'noplaylist': False,  
     'nocheckcertificate': True,
-    'ignoreerrors': True, # Para que si una canción de la playlist está borrada, no rompa todo
+    'ignoreerrors': False,  
     'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
+    'quiet': False,
+    'no_warnings': False,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    # FIX: Usar archivo de cookies exportado desde el navegador
-    # Exporta tus cookies con la extensión "Get cookies.txt LOCALLY" de Chrome/Edge
-    'cookiefile': 'cookies.txt',
+    #'cookiefile': 'cookies.txt',  # Asegúrate de que este archivo esté en la misma carpeta
 }
+
+# INSTANCIA 1: Para YouTube Normal (iOS sigue siendo el rey antibloqueos aquí)
+YTDL_NORMAL_OPTIONS = YTDL_BASE_OPTIONS.copy()
+YTDL_NORMAL_OPTIONS['extractor_args'] = {'youtube': {'player_client': ['ios', 'web']}}
+ytdl_normal = yt_dlp.YoutubeDL(YTDL_NORMAL_OPTIONS)
+
+# INSTANCIA 2: Para YouTube Music (web_music va primero para no romper listas/álbumes)
+YTDL_MUSIC_OPTIONS = YTDL_BASE_OPTIONS.copy()
+ytdl_music = yt_dlp.YoutubeDL(YTDL_MUSIC_OPTIONS)
+
+
+def get_ytdl_client(is_music=False):
+    """Devuelve la instancia correcta de yt-dlp según el tipo de contenido"""
+    return ytdl_music if is_music else ytdl_normal
+
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
-ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
-
 
 class TrackInfo:
-    """Almacena los metadatos de una canción SIN crear el stream de FFmpeg todavía.
-    Esto evita que las URLs expiren antes de que se reproduzcan."""
-    def __init__(self, data):
+    """Almacena los metadatos de una canción SIN crear el stream de FFmpeg todavía."""
+    def __init__(self, data, from_music=False):
         self.data = data
         self.title = data.get('title', 'Desconocido')
-        self.webpage_url = data.get('webpage_url', data.get('url', ''))
+        url = data.get('url', '')
+        self.webpage_url = data.get('webpage_url', url)
+        
+        print("URL ORIGINAL:", url)
+        print("URL REPRODUCCION:", self.webpage_url)
+        
+        # Guardamos si pertenece a música por si las URLs aplanadas de una playlist cambian de dominio
+        self.from_music = from_music or "music.youtube.com" in self.webpage_url
 
     async def create_source(self, loop=None):
-        """Re-extrae la URL fresca y crea el FFmpegPCMAudio justo antes de reproducir."""
+        """Re-extrae la URL fresca usando el cliente adecuado justo antes de reproducir."""
+        if not self.webpage_url:
+            print("Error: No webpage_url provided.")
+            return None
+            
         loop = loop or asyncio.get_event_loop()
-        # Re-extraer para obtener una URL de stream fresca (no expirada)
+        client = get_ytdl_client(self.from_music)
+        
         fresh_data = await loop.run_in_executor(
-            None, lambda: ytdl.extract_info(self.webpage_url, download=False)
+            None, lambda: client.extract_info(self.webpage_url, download=False)
         )
         if fresh_data is None:
+            print(f"Error obteniendo datos frescos: {self.webpage_url}")
             return None
         
-        # Si por alguna razón devuelve entries (no debería para un video individual)
         if 'entries' in fresh_data:
             fresh_data = fresh_data['entries'][0]
         
         source = discord.FFmpegPCMAudio(fresh_data['url'], **FFMPEG_OPTIONS)
+        print(f"Reextrayendo: {self.webpage_url}")
         return discord.PCMVolumeTransformer(source, volume=0.5)
+        
 
 
 async def extract_tracks(url, *, loop=None):
-    """Extrae la información de forma asíncrona. Soporta videos individuales y playlists.
-    Devuelve una lista de TrackInfo (metadatos), NO streams de audio."""
+    """Extrae la información de forma asíncrona mapeando el cliente correcto."""
     loop = loop or asyncio.get_event_loop()
     
-    # Extraemos la info sin descargar el archivo
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+    is_music = "music.youtube.com" in url
+    client = get_ytdl_client(is_music)
+    
+    data = await loop.run_in_executor(None, lambda: client.extract_info(url, download=False))
     
     if data is None:
         return None
 
-    # Si es una playlist, vendrá una lista de canciones en 'entries'
     if 'entries' in data:
         tracks = []
         for entry in data['entries']:
-            if entry:  # Asegurar que el video no esté privado o borrado
-                tracks.append(TrackInfo(entry))
+            if entry:  
+                tracks.append(TrackInfo(entry, from_music=is_music))
         return tracks if tracks else None
     
-    # Si es una sola canción
-    return [TrackInfo(data)]
+    return [TrackInfo(data, from_music=is_music)]
+    
+    print(f"Extrayendo: {url}")
 
 
 class MusicPlayer:
@@ -87,7 +112,7 @@ class MusicPlayer:
         self.bot = ctx.bot
         self.guild = ctx.guild
         self.channel = ctx.channel
-        self.queue = deque()  # Cola de TrackInfo objects
+        self.queue = deque()  
         self.next = asyncio.Event()
         self.current = None
         self.bot.loop.create_task(self.player_loop())
@@ -100,11 +125,9 @@ class MusicPlayer:
             self.next.clear()
             
             if not self.queue:
-                # Si la cola está vacía, espera 1 segundo antes de volver a revisar
                 await asyncio.sleep(1)
                 continue
             
-            # FIX: Verificar que seguimos conectados al canal de voz
             vc = self.guild.voice_client
             if not vc or not vc.is_connected():
                 await asyncio.sleep(1)
@@ -114,7 +137,6 @@ class MusicPlayer:
             self.current = track_info
             
             try:
-                # FIX: Crear el stream de audio JUSTO antes de reproducir (URL fresca)
                 source = await track_info.create_source(loop=self.bot.loop)
                 if source is None:
                     await self.channel.send(f"⚠️ No se pudo reproducir: **{track_info.title}**. Saltando...")
@@ -122,13 +144,11 @@ class MusicPlayer:
                 
                 await self.channel.send(f"🎶 Ahora reproduciendo: **{track_info.title}**")
                 
-                # Reproducir audio y activar 'self.next' cuando termine la canción actual
                 vc.play(
                     source, 
                     after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set)
                 )
                 
-                # Esperar hasta que la canción termine o se use el comando skip
                 await self.next.wait()
             except Exception as e:
                 await self.channel.send(f"⚠️ Error reproduciendo **{track_info.title}**: {e}")
