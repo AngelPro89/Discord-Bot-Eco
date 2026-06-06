@@ -78,8 +78,7 @@ async def weather(ctx, *, city: str):
         emoji = "☁️"
         color = discord.Color.light_grey()
 
-    speak_text(f'En {city} hace {w_info}')
-
+    
     if ctx.author.avatar:
         author_icon_url = ctx.author.avatar.url
     else:
