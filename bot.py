@@ -17,6 +17,8 @@ from clima import get_weather
 import aiohttp   
 import asyncio
 from music import extract_tracks, MusicPlayer 
+from eco import get_eco_embed
+from game import start_discord_game
 
 
 print(discord.__version__)
@@ -32,6 +34,28 @@ players = {}
 async def on_ready():
     bot.aio_session = aiohttp.ClientSession()
     print(f'Andamos ready pa 😎👍 {bot.user}')
+    
+    # --- NUEVA FUNCIÓN: Enviar mensaje al iniciar ---
+    # Iteramos sobre todos los servidores (guilds) en los que está el bot
+    for guild in bot.guilds:
+        # Intentamos usar el canal del sistema, o el primer canal de texto disponible
+        channel = guild.system_channel
+        if channel is None and guild.text_channels:
+            channel = guild.text_channels[0]
+            
+        if channel:
+            try:
+                # Creamos un embed hermoso y minimalista para el saludo inicial
+                embed_inicio = discord.Embed(
+                    title="🚀 ¡Bot Iniciado y Listo!",
+                    description="¡Hola a todos! Acabo de despertar. 🤖\n\n**Escribe el comando `!start` para saber todo lo que puedo hacer.**",
+                    color=discord.Color.magenta() # Color llamativo
+                )
+                embed_inicio.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/4712/4712139.png") # Icono de encendido/robot
+                await channel.send(embed=embed_inicio)
+            except discord.Forbidden:
+                # En caso de no tener permisos para enviar mensajes en ese canal, lo omitimos
+                pass
 
 @bot.event
 async def on_close():
@@ -41,7 +65,36 @@ async def on_close():
 
 @bot.command(name='start')
 async def start(ctx):
-    await ctx.send('¡Hola! Soy tu bot de confianza, que te dirá si hace un calorazo 🔥🔥🔥 o si te vas a morir de frío🧊🧊❄️❄️ pa 😎👍')
+    # --- FUNCIÓN RECONSTRUIDA: Mostrar todos los comandos del bot ---
+    # Creamos un Embed muy visual para listar las funciones
+    embed = discord.Embed(
+        title="🌟 Panel de Control del Bot",
+        description="¡Hola! Soy tu bot de confianza. Aquí tienes una lista de todo lo que puedo hacer por ti:",
+        color=discord.Color.gold() # Cambiado a dorado para destacar las funciones premium
+    )
+    
+    # --- FUNCIONES GOLD (Destacadas) ---
+    embed.add_field(name="🏆 `!game` [NUEVO]", value="**¡Juego Interactivo por Voz!** Únete a un canal de voz, recibe palabras y dila traducción usando tu micrófono. ¡Gana títulos!", inline=False)
+    embed.add_field(name="🎵 `!play <canción/URL>`", value="**¡Sistema de Música Avanzado!** Reproduce música desde YouTube en tu canal de voz. ¡Soporta playlists completas!", inline=False)
+    
+    # --- OTRAS FUNCIONES ---
+    embed.add_field(name="🌤️ `!weather <ciudad>`", value="Te muestra el pronóstico del clima de la ciudad que elijas con un diseño bonito.", inline=False)
+    embed.add_field(name="🌱 `!eco`", value="Te da un tip ecológico aleatorio con un diseño minimalista para ayudar a salvar el planeta.", inline=False)
+    embed.add_field(name="🗣️ `!join`", value="Hace que el bot se una a tu canal de voz actual.", inline=False)
+    embed.add_field(name="🔒 `!perms`", value="Revisa si el bot tiene permisos para hablar y conectarse en tu canal de voz.", inline=False)
+    
+    # Thumbnail minimalista para el embed
+    embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/4712/4712010.png")
+    
+    # Verificamos si el usuario tiene avatar para evitar errores al obtener su imagen
+    if ctx.author.avatar:
+        author_icon_url = ctx.author.avatar.url
+    else:
+        author_icon_url = ctx.author.display_avatar.url
+        
+    embed.set_footer(text=f"Solicitado por {ctx.author.name} • Creado para ayudarte 😎", icon_url=author_icon_url)
+    
+    await ctx.send(embed=embed)
 
 @bot.command(name='weather')
 async def weather(ctx, *, city: str):
@@ -237,5 +290,20 @@ async def perms(ctx):
     print("Speak:", channel.permissions_for(ctx.guild.me).speak)
 
     await ctx.send("Revisado")
+
+@bot.command(name='eco')
+async def eco_tip(ctx):
+    if ctx.author.avatar:
+        author_icon_url = ctx.author.avatar.url
+    else:
+        author_icon_url = ctx.author.display_avatar.url
+        
+    embed = get_eco_embed(ctx.author.name, author_icon_url)
+    await ctx.send(embed=embed)
+
+@bot.command(name='game')
+async def play_translation_game(ctx):
+    # Llama a la función principal de game.py que gestiona todo el juego en Discord
+    await start_discord_game(ctx, bot)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
