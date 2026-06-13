@@ -14,9 +14,11 @@ import functools
 # pyrefly: ignore [missing-import]
 from discord.ext import voice_recv
 
-# --- MONKEY PATCH PARA EVITAR CRASH POR PAQUETES CORRUPTOS (OpusError) ---
+# --- MONKEY PATCH PARA EVITAR CRASH POR PAQUETES CORRUPTOS Y DECRIPTACIÓN DAVE/E2EE ---
 import discord.ext.voice_recv.opus as vr_opus
 import discord.opus as discord_opus
+import discord.ext.voice_recv.reader as vr_reader
+import davey
 
 original_decode_packet = vr_opus.PacketDecoder._decode_packet
 
@@ -29,6 +31,32 @@ def safe_decode_packet(self, packet):
         return packet, b'\x00' * 3840 # Silencio estándar
 
 vr_opus.PacketDecoder._decode_packet = safe_decode_packet
+
+original_reader_init = vr_reader.AudioReader.__init__
+
+def patched_reader_init(self, sink, voice_client, *args, **kwargs):
+    original_reader_init(self, sink, voice_client, *args, **kwargs)
+    
+    original_decrypt_rtp = self.decryptor.decrypt_rtp
+    
+    def patched_decrypt_rtp(packet):
+        decrypted = original_decrypt_rtp(packet)
+        dave_session = voice_client._connection.dave_session
+        if dave_session and dave_session.ready:
+            user_id = voice_client._get_id_from_ssrc(packet.ssrc)
+            if user_id:
+                try:
+                    decrypted = dave_session.decrypt(user_id, davey.MediaType.audio, decrypted)
+                except Exception as e:
+                    import logging
+                    logging.getLogger("discord.ext.voice_recv").error(
+                        f"DAVE decryption failed for SSRC {packet.ssrc} (User {user_id}): {e}"
+                    )
+        return decrypted
+        
+    self.decryptor.decrypt_rtp = patched_decrypt_rtp
+
+vr_reader.AudioReader.__init__ = patched_reader_init
 # -------------------------------------------------------------------------
 
 # ─── Game Settings ───

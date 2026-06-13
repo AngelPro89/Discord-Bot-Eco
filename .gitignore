@@ -3,3 +3,4 @@ __pycache__/
 *.wav
 .env
 cookies.txt
+last_startup.txt

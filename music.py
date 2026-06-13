@@ -13,13 +13,13 @@ YTDL_BASE_OPTIONS = {
     'restrictfilenames': True,
     'noplaylist': False,  
     'nocheckcertificate': True,
-    'ignoreerrors': False,  
+    'ignoreerrors': True,  # True para que NO falle toda la playlist por un video con error
     'logtostderr': False,
     'quiet': False,
     'no_warnings': False,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    #'cookiefile': 'cookies.txt',  # Asegúrate de que este archivo esté en la misma carpeta
+    #'cookiefile': 'cookies.txt',  # Deshabilitado: cookies expiradas causan errores de formato
 }
 
 # INSTANCIA 1: Para YouTube Normal (iOS sigue siendo el rey antibloqueos aquí)
@@ -27,8 +27,9 @@ YTDL_NORMAL_OPTIONS = YTDL_BASE_OPTIONS.copy()
 YTDL_NORMAL_OPTIONS['extractor_args'] = {'youtube': {'player_client': ['ios', 'web']}}
 ytdl_normal = yt_dlp.YoutubeDL(YTDL_NORMAL_OPTIONS)
 
-# INSTANCIA 2: Para YouTube Music (web_music va primero para no romper listas/álbumes)
+# INSTANCIA 2: Para YouTube Music (android_vr no requiere JS runtime para resolver firmas)
 YTDL_MUSIC_OPTIONS = YTDL_BASE_OPTIONS.copy()
+YTDL_MUSIC_OPTIONS['extractor_args'] = {'youtube': {'player_client': ['android_vr', 'ios']}}
 ytdl_music = yt_dlp.YoutubeDL(YTDL_MUSIC_OPTIONS)
 
 
@@ -139,10 +140,19 @@ class MusicPlayer:
             try:
                 source = await track_info.create_source(loop=self.bot.loop)
                 if source is None:
-                    await self.channel.send(f"⚠️ No se pudo reproducir: **{track_info.title}**. Saltando...")
+                    skip_embed = discord.Embed(
+                        description=f"⚠️ No se pudo reproducir: **{track_info.title}**. Saltando...",
+                        color=discord.Color.orange()
+                    )
+                    await self.channel.send(embed=skip_embed)
                     continue
                 
-                await self.channel.send(f"🎶 Ahora reproduciendo: **{track_info.title}**")
+                now_playing_embed = discord.Embed(
+                    title="🎶 Ahora Reproduciendo",
+                    description=f"**{track_info.title}**",
+                    color=discord.Color.purple()
+                )
+                await self.channel.send(embed=now_playing_embed)
                 
                 vc.play(
                     source, 
@@ -151,5 +161,9 @@ class MusicPlayer:
                 
                 await self.next.wait()
             except Exception as e:
-                await self.channel.send(f"⚠️ Error reproduciendo **{track_info.title}**: {e}")
+                error_embed = discord.Embed(
+                    description=f"⚠️ Error reproduciendo **{track_info.title}**: `{e}`",
+                    color=discord.Color.red()
+                )
+                await self.channel.send(embed=error_embed)
                 continue

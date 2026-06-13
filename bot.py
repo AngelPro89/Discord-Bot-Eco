@@ -16,6 +16,11 @@ from clima import get_weather
 # pyrefly: ignore [missing-import]
 import aiohttp   
 import asyncio
+import random
+from datetime import datetime, timedelta
+
+STARTUP_FILE = 'last_startup.txt'
+STARTUP_COOLDOWN = timedelta(hours=12)
 from music import extract_tracks, MusicPlayer 
 from eco import get_eco_embed
 from game import start_discord_game
@@ -35,27 +40,39 @@ async def on_ready():
     bot.aio_session = aiohttp.ClientSession()
     print(f'Andamos ready pa 😎👍 {bot.user}')
     
-    # --- NUEVA FUNCIÓN: Enviar mensaje al iniciar ---
-    # Iteramos sobre todos los servidores (guilds) en los que está el bot
-    for guild in bot.guilds:
-        # Intentamos usar el canal del sistema, o el primer canal de texto disponible
-        channel = guild.system_channel
-        if channel is None and guild.text_channels:
-            channel = guild.text_channels[0]
-            
-        if channel:
-            try:
-                # Creamos un embed hermoso y minimalista para el saludo inicial
-                embed_inicio = discord.Embed(
-                    title="🚀 ¡Bot Iniciado y Listo!",
-                    description="¡Hola a todos! Acabo de despertar. 🤖\n\n**Escribe el comando `!start` para saber todo lo que puedo hacer.**",
-                    color=discord.Color.magenta() # Color llamativo
-                )
-                embed_inicio.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/4712/4712139.png") # Icono de encendido/robot
-                await channel.send(embed=embed_inicio)
-            except discord.Forbidden:
-                # En caso de no tener permisos para enviar mensajes en ese canal, lo omitimos
-                pass
+    # --- Verificación de cooldown de 12 horas para el mensaje de inicio ---
+    send_greeting = True
+    try:
+        if os.path.exists(STARTUP_FILE):
+            with open(STARTUP_FILE, 'r') as f:
+                last_time = datetime.fromisoformat(f.read().strip())
+            if datetime.now() - last_time < STARTUP_COOLDOWN:
+                send_greeting = False
+                print('⏳ Saludo omitido (cooldown de 12h activo)')
+    except Exception:
+        pass  # Si el archivo está corrupto, enviamos el saludo
+    
+    if send_greeting:
+        # Guardamos el timestamp actual
+        with open(STARTUP_FILE, 'w') as f:
+            f.write(datetime.now().isoformat())
+        
+        for guild in bot.guilds:
+            channel = guild.system_channel
+            if channel is None and guild.text_channels:
+                channel = guild.text_channels[0]
+                
+            if channel:
+                try:
+                    embed_inicio = discord.Embed(
+                        title="🚀 ¡Bot Iniciado y Listo!",
+                        description="¡Hola a todos! Acabo de despertar. 🤖\n\n**Escribe el comando `!start` para saber todo lo que puedo hacer.**",
+                        color=discord.Color.magenta()
+                    )
+                    embed_inicio.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/4712/4712139.png")
+                    await channel.send(embed=embed_inicio)
+                except discord.Forbidden:
+                    pass
 
 @bot.event
 async def on_close():
@@ -203,42 +220,101 @@ class MusicControlView(discord.ui.View):
             await interaction.response.send_message("❌ No estoy conectado a un canal de voz.", ephemeral=True)
 
 
+# --- VISTA DE SHUFFLE PARA PLAYLISTS ---
+class ShufflePromptView(discord.ui.View):
+    def __init__(self, author_id):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.shuffle = False
+        self.responded = asyncio.Event()
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            error_embed = discord.Embed(
+                description="❌ Solo quien pidió la playlist puede elegir.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="🔀 Mezclar Playlist", style=discord.ButtonStyle.green)
+    async def shuffle_btn(self, interaction: discord.Interaction, button):
+        self.shuffle = True
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="🔀 ¡Modo Aleatorio Activado!",
+            description="Las canciones se reproducirán en orden aleatorio. 🎲",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.responded.set()
+
+    @discord.ui.button(label="📋 Orden Original", style=discord.ButtonStyle.grey)
+    async def order_btn(self, interaction: discord.Interaction, button):
+        self.shuffle = False
+        for child in self.children:
+            child.disabled = True
+        embed = discord.Embed(
+            title="📋 Orden Original",
+            description="Las canciones se reproducirán en el orden de la playlist. 📑",
+            color=discord.Color.blurple()
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.responded.set()
+
+    async def on_timeout(self):
+        # Si no responde en 30s, continúa en orden por defecto
+        self.responded.set()
+
+
 # --- COMANDOS DEL BOT ---
 @bot.command(name='play')
 async def play(ctx, *, search: str):
     # Validar que el usuario esté en un canal de voz
     if not ctx.author.voice:
-        return await ctx.send("❌ ¡Debes estar en un canal de voz para usar este comando!")
+        error_embed = discord.Embed(
+            description="❌ ¡Debes estar en un canal de voz para usar este comando!",
+            color=discord.Color.red()
+        )
+        return await ctx.send(embed=error_embed)
 
-    # Mensaje de espera (ideal para playlists largas mientras carga la info en segundo plano)
-    waiting_msg = await ctx.send("🔍 **Procesando tu petición...** (Si es una playlist esto puede tardar unos segundos)")
+    # Mensaje de espera con embed
+    loading_embed = discord.Embed(
+        title="🔍 Procesando tu petición...",
+        description="Si es una playlist esto puede tardar unos segundos.",
+        color=discord.Color.light_grey()
+    )
+    waiting_msg = await ctx.send(embed=loading_embed)
 
     try:
         # FIX: Extraer la info ANTES de conectar al canal de voz
-        # Así evitamos conectar y quedarnos sin audio (error 4017)
         tracks = await extract_tracks(search, loop=bot.loop)
         
         if not tracks:
-            return await waiting_msg.edit(content="❌ No se encontró ningún resultado o el enlace es privado.")
+            error_embed = discord.Embed(
+                description="❌ No se encontró ningún resultado o el enlace es privado.",
+                color=discord.Color.red()
+            )
+            return await waiting_msg.edit(embed=error_embed)
 
         # FIX: Conectarse al canal DESPUÉS de confirmar que hay tracks disponibles
         if not ctx.voice_client:
             try:
                 print(f"Intentando conectar a: {ctx.author.voice.channel.name}")
-
                 vc = await ctx.author.voice.channel.connect(
                     timeout=30,
                     reconnect=True
                 )
-
                 print(f"Conectado correctamente: {vc}")
-
             except Exception as e:
                 print(f"ERROR DE VOZ: {type(e).__name__}: {e}")
-
-                return await waiting_msg.edit(
-                    content=f"❌ Error al conectarme al canal de voz:\n`{e}`"
+                error_embed = discord.Embed(
+                    description=f"❌ Error al conectarme al canal de voz:\n`{e}`",
+                    color=discord.Color.red()
                 )
+                return await waiting_msg.edit(embed=error_embed)
         
         # Pequeña espera para que la conexión de voz se estabilice
         await asyncio.sleep(1)
@@ -249,29 +325,61 @@ async def play(ctx, *, search: str):
         
         player = players[ctx.guild.id]
 
-        # LÓGICA DE EMBED LLAMATIVO
-        embed = discord.Embed(title="🎵 Sistema de Música Avanzado", color=discord.Color.purple())
-        
-        # Validamos si es una lista de canciones (Playlist) o track único
+        # --- LÓGICA SEGÚN PLAYLIST O TRACK ÚNICO ---
         if len(tracks) > 1:
+            # PLAYLIST: Preguntar si quiere mezclar
+            shuffle_embed = discord.Embed(
+                title="🎵 Playlist Detectada",
+                description=f"Se encontraron **{len(tracks)}** canciones.\n\n¿Cómo quieres reproducir la playlist?",
+                color=discord.Color.purple()
+            )
+            shuffle_embed.set_footer(text=f"Solicitado por {ctx.author.name} • Tienes 30s para elegir", icon_url=ctx.author.display_avatar.url)
+            
+            shuffle_view = ShufflePromptView(ctx.author.id)
+            await waiting_msg.edit(embed=shuffle_embed, view=shuffle_view)
+            
+            # Esperamos la respuesta del usuario (máximo 30 segundos)
+            await shuffle_view.responded.wait()
+            
+            # Aplicar shuffle si el usuario lo eligió
+            if shuffle_view.shuffle:
+                random.shuffle(tracks)
+            
             for track in tracks:
                 player.queue.append(track)
             
-            embed.description = f"✅ Se han añadido **{len(tracks)}** canciones de la Playlist a la lista de espera."
-            embed.add_field(name="Origen", value="Lista de reproducción de YouTube", inline=True)
+            # Embed final con controles de música
+            mode = "🔀 Aleatorio" if shuffle_view.shuffle else "📋 En Orden"
+            result_embed = discord.Embed(
+                title="🎵 Sistema de Música Avanzado",
+                description=f"✅ Se han añadido **{len(tracks)}** canciones a la lista de espera.",
+                color=discord.Color.purple()
+            )
+            result_embed.add_field(name="Modo", value=mode, inline=True)
+            result_embed.add_field(name="Origen", value="Lista de reproducción de YouTube", inline=True)
+            result_embed.set_footer(text=f"Solicitado por {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+            
+            await ctx.send(embed=result_embed, view=MusicControlView(player))
+        
         else:
+            # TRACK ÚNICO: Agregar directamente
             player.queue.append(tracks[0])
-            embed.description = f"✅ Añadido a la lista de espera:\n**{tracks[0].title}**"
+            embed = discord.Embed(
+                title="🎵 Sistema de Música Avanzado",
+                description=f"✅ Añadido a la lista de espera:\n**{tracks[0].title}**",
+                color=discord.Color.purple()
+            )
             embed.add_field(name="Canción", value=tracks[0].title, inline=False)
-
-        embed.set_footer(text=f"Solicitado por {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
-
-        # Modificamos el mensaje de espera original por el Embed llamativo y le añadimos los botones interactivos
-        await waiting_msg.edit(content=None, embed=embed, view=MusicControlView(player))
+            embed.set_footer(text=f"Solicitado por {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+            await waiting_msg.edit(embed=embed, view=MusicControlView(player))
 
     except Exception as e:
         print(f"Error en play: {e}")
-        await waiting_msg.edit(content=f"❌ Hubo un error al intentar reproducir el audio: {e}")
+        error_embed = discord.Embed(
+            description=f"❌ Hubo un error al intentar reproducir el audio:\n`{e}`",
+            color=discord.Color.red()
+        )
+        await waiting_msg.edit(embed=error_embed)
 
 
 @bot.command()
